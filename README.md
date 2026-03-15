@@ -22,7 +22,13 @@ Handles all Z80 prefixes (CB, DD/FD, ED) including 4-byte DD CB and ED 43-7B var
 
 ### 2. Context-validated LD C patching
 
-`LD C,$98` (`0E 98`) is common as data. The patcher now only patches `LD C,<port>` when a block I/O instruction (OUTI/OTIR/INI/INIR/OUTD/OTDR) is confirmed within 12 bytes ahead, using a bit-pattern check on ED-prefixed opcodes (bit 1 set, range $A2-$BB).
+`LD C,$98` (`0E 98`) is common as data. The patcher now only patches `LD C,<port>` when a C-register I/O instruction is confirmed within 12 bytes ahead:
+
+- **Individual I/O**: `OUT (C),r` / `IN r,(C)` (ED 40-79, pattern `AND $C6 == $40`)
+- **Single-transfer block I/O**: OUTI/INI/OUTD/IND (ED A2-AB)
+- **Repeat block I/O**: OTIR/INIR/OTDR/INDR (ED B2-BB) — **PSG only**
+
+Repeat block I/O is rejected for VDP ports because OTIR causes visual snow on the TMS9918 — the repeat transfer is too fast for the VDP's internal timing. Real games use OUTI in a DJNZ loop instead, so `LD C,$98` + OTIR is almost certainly a data false positive.
 
 ### Additional improvements
 
@@ -47,7 +53,7 @@ Handles all Z80 prefixes (CB, DD/FD, ED) including 4-byte DD CB and ED 43-7B var
 | $AA | OUT (PPI-C row) | NOP NOP | no-op (A preserved) |
 | $AA | IN (PPI-C read) | LD A,$F0 | return upper nibble |
 | $AB | OUT (PPI mode) | NOP NOP | no-op |
-| LD C,$98-$A2 | + block I/O | NABU port | context-validated |
+| LD C,$98-$A2 | + OUTI/OUT(C)/IN(C) | NABU port | context-validated |
 
 ### Known limitations
 
