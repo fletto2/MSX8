@@ -5375,15 +5375,24 @@ PLCVLP:
 PLCVED:
 	INC	HL		; byte after ED
 	LD	A,(HL)
-	; Block I/O opcodes: A2,A3,AA,AB,B2,B3,BA,BB
+	; Check 1: individual OUT (C),r / IN r,(C)
+	; ED 40-79: IN r,(C) = 01_rrr_000, OUT (C),r = 01_rrr_001
+	; All satisfy (byte AND $C6) == $40
+	LD	E,A		; save A (D is scratch in look-ahead)
+	AND	$C6
+	CP	$40
+	LD	A,E		; restore A (preserves flags from CP)
+	JR	Z,PLCVYES	; confirmed individual C-port I/O
+	; Check 2: block I/O (OUTI/OTIR/INI/INIR/OUTD/OTDR/IND/INDR)
 	; All have bit 1 set, range $A2-$BB
 	BIT	1,A
-	JR	Z,PLCVNX	; bit 1 clear = not block I/O
+	JR	Z,PLCVNX	; bit 1 clear = not I/O
 	CP	$A2
 	JR	C,PLCVNX	; < $A2
 	CP	$BC
 	JR	NC,PLCVNX	; >= $BC
-	; Confirmed block I/O instruction
+PLCVYES:
+	; Confirmed: instruction uses port in C register
 	POP	DE
 	POP	HL
 	SCF			; set carry = confirmed
