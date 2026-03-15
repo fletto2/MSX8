@@ -189,7 +189,7 @@ RDSLT: 	jp      A01B6                   ; $000C
 
         defs    $0010-$,0
 
-CHRGTR: jp	NBKBD
+CHRGTR: jp	KBD_MTX
 ;	jp      A2686                   ; $0010
 
         defs    $0014-$,0
@@ -198,7 +198,7 @@ WRSLT:  jp      A01D1                   ; $0014
 
         defs    $0018-$,0
 
-OUTDO:  jp	NBJSTK
+OUTDO:  jp	PSG_RD
 	;jp      A1B45                   ; $0018
 
         defs    $001C-$,0
@@ -5053,147 +5053,183 @@ HEXTBL:	db	$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$41,$42,$43,$44,$45,$46
 ;
 ; Pad to $2900
         DEFS    $2900 - ASMPC
-; PATCH DIRECT PSG/VDP I/O
-; ENTER HL=START ADR, DE=NUM BYTES
-; RETURN A=NUM PATCHES
+; ============================================================
+; PATCOM - MSX-to-NABU Direct I/O Port Patcher
+; Scans ROM code for MSX port I/O instructions and patches
+; them for NABU PC hardware.
+;
+; Detects: OUT (nn),A / IN A,(nn) / LD C,nn + block I/O
+; Patches: VDP $98/$99 -> $A0/$A1 (byte patch)
+;          PSG $A0/$A1/$A2 -> RST trampolines
+;          PPI $A8/$A9/$AA/$AB -> NOP/RST/LD A,n
+;          LD C,nn -> NABU port (context-validated)
+;
+; Entry: HL=start address, DE=byte count
+; Exit:  A=number of patches applied
+; ============================================================
 PATCOM:
+	XOR	A
+	LD	(PATCNT),A
+PATSCAN:
 	LD	A,(HL)
+	CP	$D3		; OUT (nn),A
+	JR	Z,PCHKOUT
+	CP	$DB		; IN A,(nn)
+	JR	Z,PCHKIN
+	CP	$0E		; LD C,nn (for OUTI/OTIR)
+	JR	Z,PCHKLDC
+	; Not I/O - skip entire instruction using length table
+	; This prevents operand bytes from being misidentified as opcodes
+	CALL	PATSKIP		; advance HL/DE past instruction
+	JR	NZ,PATSCAN	; bytes remain, continue
+	JR	PATDONE
+PATNXT:
 	INC	HL
-	CP	$DB	; IN OPCODE
-	CALL	Z,PATCOM1
-	CP	$D3	; OUT OPCODE
-	CALL	Z,PATCOM1
-	CP	$ED	; OUTI OPCODE
-	CALL	Z,PATCOME
 	DEC	DE
 	LD	A,D
 	OR	E
-	JR	NZ,PATCOM
+	JR	NZ,PATSCAN
+PATDONE:
 	LD	A,(PATCNT)
 	RET
-PATCOM1:
+;
+; ---- OUT (nn),A handler ----
+; HL points to D3 opcode, advance to port byte and check
+PCHKOUT:
+	INC	HL
 	LD	A,(HL)
-	PUSH	HL
+	; VDP ports: simple byte patch
+	CP	$98
+	JR	Z,PP_VDP_D
+	CP	$99
+	JR	Z,PP_VDP_C
+	; PSG ports: RST trampolines
 	CP	$A0
-	CALL	Z,PATCA0
+	JR	Z,PP_PSG_AO
 	CP	$A1
-	CALL	Z,PATCA1
-	CP	$A2
-	CALL	Z,PATCA2
+	JR	Z,PP_PSG_DO
+	; PPI ports: NOP (no PPI on NABU)
 	CP	$A8
-	CALL	Z,PATCA8
-	CP	$A9
-	CALL	Z,PATCA9
-	CP	$AA
-	CALL	Z,PATCA8
+	JR	Z,PP_NOP2
+	CP	$A9		; PPI-B write (rare, Con-Dori only)
+	JR	Z,PP_NOP2
+	CP	$AA		; PPI-C row select -> NOP (A preserved)
+	JR	Z,PP_NOP2
+	CP	$AB		; PPI mode -> NOP
+	JR	Z,PP_NOP2
+	JR	PATNXT
+;
+; ---- IN A,(nn) handler ----
+PCHKIN:
+	INC	HL
+	LD	A,(HL)
+	; VDP ports: simple byte patch
 	CP	$98
-	CALL	Z,PATC98
+	JR	Z,PP_VDP_D
 	CP	$99
-	CALL	Z,PATC99
-	POP	HL
-	RET
+	JR	Z,PP_VDP_C
+	; PSG read port
+	CP	$A2
+	JR	Z,PP_PSG_RI
+	; PPI ports
+	CP	$A8		; slot read -> LD A,0
+	JR	Z,PP_LDA0
+	CP	$A9		; keyboard matrix -> LD C,A + RST 10
+	JR	Z,PP_KBD
+	CP	$AA		; PPI-C read -> LD A,$F0
+	JR	Z,PP_LDAF0
+	JR	PATNXT
 ;
-PATCA0:	DEC	HL
-	LD	A,(HL)
-	CP	$D3	; OUT
-	JR	Z,PATCA0O
-	INC	HL
-	LD	A,PSGCTL
-	LD	(HL),A
-	JP	PATCHED
-; RST 28
-PATCA0O:
-	LD	(HL),$EF ; RST 28
-	INC	HL
-	LD	(HL),0	; NOP
-	JP	PATCHED
-;
-PATCA1:	DEC	HL
-	LD	A,(HL)
-	CP	$D3	; OUT
-	JR	Z,PATCA1O
-	INC	HL
-	LD	A,PSGDAT
-	LD	(HL),A
-	JP	PATCHED
-; RST 30
-PATCA1O:
-	LD	(HL),$F7 ; RST 30
-	INC	HL
-	LD	(HL),0	; NOP
-	JP	PATCHED
-; LOOK FOR AND PATCH JOYSTICK FUNCTION
-; OUT 0A0H,A
-; IN A,0A2H
-; CHANGES TO
-; CALL 00D5H
-; CPL
-PATCA2:
-	LD	(HL),0	; NOP
-	DEC	HL
-	LD	(HL),$DF ; RST 18
-	JP	PATCHED
-PATCA8:
-	DEC	HL
-	XOR	A
-	LD	(HL),A	; NOP
-	INC	HL
-	LD	(HL),A	; NOP
-	JP	PATCHED
-; KEYBOARD INPUT PATCH
-PATCA9:
-	DEC	HL
-	LD	(HL),$4F ; LD C,A
-	INC	HL
-	LD	(HL),$DF ; RST 10
-	JP	PATCHED
-PATC98:
-	LD	A,VDPDAT
-	LD	(HL),A
-	JP	PATCHED
-PATC99:
-	LD	A,VDPCTL
-	LD	(HL),A
-	JP	PATCHED
-PATCOME:
-	PUSH	HL
-	PUSH	DE
-	LD	E,$20	; CHECK ONLY 32 BYTES BACK
-PATCOME1:
-	LD	A,(HL)
-	CP	$A3	; OUTI OPCODE
-	JR	NZ,PATCOMEX
-PATCOME1A:
-	DEC	HL
-	LD	A,(HL)
-	CP	$0E	; LOOKING FOR LD C,<N>
-	JR	Z,PATCOME2
-	DEC	E
-	JR	NZ,PATCOME1A
-	JR	PATCOMEX
-PATCOME2:
+; ---- LD C,nn handler (context-validated) ----
+; Only patch if OUTI/OTIR/INI/INIR follows within 12 bytes
+PCHKLDC:
 	INC	HL
 	LD	A,(HL)
+	CP	$98
+	JR	Z,PLC_98
+	CP	$99
+	JR	Z,PLC_99
 	CP	$A0
-	CALL	Z,PATCA0
+	JR	Z,PLC_A0
 	CP	$A1
-	CALL	Z,PATCA1
-;	CP	$A2
-;	CALL	Z,PATCA2
-	CP	$98
-	CALL	Z,PATC98
-	CP	$99
-	CALL	Z,PATC99
-PATCOMEX:
-	POP	DE
-	POP	HL
-	RET
+	JR	Z,PLC_A1
+	CP	$A2
+	JR	Z,PLC_A2
+	JR	PATNXT
+; LD C target setup: B = NABU replacement port
+PLC_98:	LD	B,$A0		; VDP data
+	JR	PLC_VER
+PLC_99:	LD	B,$A1		; VDP ctrl
+	JR	PLC_VER
+PLC_A0:	LD	B,PSGCTL	; PSG addr ($41)
+	JR	PLC_VER
+PLC_A1:	LD	B,PSGDAT	; PSG data ($40)
+	JR	PLC_VER
+PLC_A2:	LD	B,PSGRIN	; PSG read ($40)
+	; fall through
+; Verify: look ahead up to 12 bytes for block I/O (ED xx)
+PLC_VER:
+	CALL	PLCVFY		; subroutine in helper area
+	JP	NC,PATNXT	; no block I/O found
+	LD	(HL),B		; patch LD C operand
+	JR	PATCHED
+;
+; ---- Patch actions ----
+;
+; VDP data port: $98 -> $A0
+PP_VDP_D:
+	LD	(HL),VDPDAT
+	JR	PATCHED
+; VDP control port: $99 -> $A1
+PP_VDP_C:
+	LD	(HL),VDPCTL
+	JR	PATCHED
+; PSG addr OUT ($A0) -> RST 28 + NOP
+PP_PSG_AO:
+	LD	B,$EF		; RST 28
+	JR	PP_RPL2
+; PSG data OUT ($A1) -> RST 30 + NOP
+PP_PSG_DO:
+	LD	B,$F7		; RST 30
+	JR	PP_RPL2
+; PSG read IN ($A2) -> RST 18 + NOP
+PP_PSG_RI:
+	LD	B,$DF		; RST 18
+	JR	PP_RPL2
+; NOP both bytes (slot/PPI writes)
+PP_NOP2:
+	LD	B,$00		; NOP
+	; fall through to PP_RPL2 (C will be 0 = NOP)
+; Shared: replace opcode+port with B+$00
+PP_RPL2:
+	LD	C,$00		; second byte = NOP
+PP_RPL2A:
+	DEC	HL		; back to opcode byte
+	LD	(HL),B		; write replacement byte 1
+	INC	HL		; advance to port byte
+	LD	(HL),C		; write replacement byte 2
+	JR	PATCHED
+; IN ($A8) slot read -> LD A,$00
+PP_LDA0:
+	LD	B,$3E		; LD A,
+	LD	C,$00		; $00
+	JR	PP_RPL2A
+; IN ($AA) PPI-C read -> LD A,$F0 (upper nibble preserved)
+PP_LDAF0:
+	LD	B,$3E		; LD A,
+	LD	C,$F0		; $F0
+	JR	PP_RPL2A
+; IN ($A9) keyboard matrix -> LD C,A + RST 10
+PP_KBD:
+	LD	B,$4F		; LD C,A
+	LD	C,$D7		; RST 10 (KBD_MTX handler)
+	JR	PP_RPL2A
+;
 PATCHED:
 	LD	A,(PATCNT)
 	INC	A
 	LD	(PATCNT),A
-	XOR	A
-	RET
+	JP	PATNXT
 ;
 PATCNT:	DB	0
 ;
@@ -5310,6 +5346,86 @@ OUT0A17:
 	OR	$40
 	OUT	(PSGDAT),A
 	RET
+;
+; ============================================================
+; PLCVFY - LD C,nn block I/O verification subroutine
+; Called from PATCOM when LD C,<MSX port> is found.
+; Looks ahead up to 12 bytes for a Z80 block I/O instruction
+; (OUTI/OTIR/INI/INIR/OUTD/OTDR/IND/INDR = ED prefix + bit 1 set, $A2-$BB)
+; Entry: HL = pointer to port byte in LD C,nn
+; Exit:  CF set = confirmed block I/O, CF clear = not found
+; Preserves: HL, DE, B
+; ============================================================
+PLCVFY:
+	PUSH	HL
+	PUSH	DE
+	LD	D,12		; look-ahead distance
+PLCVLP:
+	INC	HL
+	LD	A,(HL)
+	CP	$ED		; ED prefix?
+	JR	Z,PLCVED
+	DEC	D
+	JR	NZ,PLCVLP
+	; No block I/O found
+	POP	DE
+	POP	HL
+	AND	A		; clear carry = not confirmed
+	RET
+PLCVED:
+	INC	HL		; byte after ED
+	LD	A,(HL)
+	; Block I/O opcodes: A2,A3,AA,AB,B2,B3,BA,BB
+	; All have bit 1 set, range $A2-$BB
+	BIT	1,A
+	JR	Z,PLCVNX	; bit 1 clear = not block I/O
+	CP	$A2
+	JR	C,PLCVNX	; < $A2
+	CP	$BC
+	JR	NC,PLCVNX	; >= $BC
+	; Confirmed block I/O instruction
+	POP	DE
+	POP	HL
+	SCF			; set carry = confirmed
+	RET
+PLCVNX:
+	DEC	D		; consumed 2 bytes (ED + xx)
+	DEC	D
+	JR	NZ,PLCVLP	; keep looking
+	POP	DE
+	POP	HL
+	AND	A		; clear carry
+	RET
+;
+; ============================================================
+; PSG_RD - PSG data read handler (RST 18 target)
+; Checks which PSG register is selected:
+;   R14/R15 (joystick ports) -> call NBJSTK for translation
+;   Other registers -> real PSG read from NABU port $40
+; ============================================================
+PSG_RD:
+	LD	A,(PSGREG)
+	CP	$0E		; joystick port 1
+	JP	Z,NBJSTK
+	CP	$0F		; joystick port 2
+	JP	Z,NBJSTK
+	IN	A,(PSGRIN)	; real PSG read (NABU port $40)
+	RET
+;
+; ============================================================
+; KBD_MTX - Keyboard matrix read handler (RST 10 target)
+; Wrapper for NBKBD that masks the row number in C.
+; Games using read-modify-write on PPI-C ($AA) may have
+; the upper nibble set (e.g. $F8 for row 8). Masking with
+; $0F extracts just the row number.
+; Entry: C = row number (possibly with upper nibble)
+; Exit:  A = keyboard matrix byte (active-low)
+; ============================================================
+KBD_MTX:
+	LD	A,C
+	AND	$0F		; extract row number from lower nibble
+	LD	C,A
+	JP	NBKBD		; existing full keyboard matrix handler
 ;
 ; Pad to $2B00
         DEFS    $2B00 - ASMPC
@@ -5990,4 +6106,125 @@ H8KBDBITX:
 KBDCNT:	db	0
 KBDKEY:	db	0
 LSTKEY:	db	0
+;
+; ============================================================
+; PATSKIP - Advance HL past current non-I/O instruction
+; Uses Z80LEN lookup table for instruction boundary tracking.
+; This prevents operand bytes (e.g. $D3 as part of LD HL,$D398)
+; from being misidentified as OUT/IN opcodes.
+;
+; Entry: A = opcode at (HL), HL = instruction address, DE = bytes remaining
+; Exit:  HL = next instruction, DE = updated
+;        NZ = bytes remain, Z = exhausted
+; Preserves: none (caller must save as needed)
+; ============================================================
+PATSKIP:
+	; Look up base instruction length
+	PUSH	HL
+	LD	C,A
+	LD	B,0
+	LD	HL,Z80LEN
+	ADD	HL,BC
+	LD	B,(HL)		; B = length (0 = prefix byte)
+	POP	HL
+	LD	A,B
+	OR	A
+	JR	Z,PS_PFX
+	; Simple instruction: skip B bytes
+PS_ADV:
+	LD	A,D
+	OR	E
+	RET	Z		; exhausted (Z set)
+	INC	HL
+	DEC	DE
+	DJNZ	PS_ADV
+	; Return NZ/Z based on DE
+	LD	A,D
+	OR	E
+	RET
+;
+PS_PFX:
+	; Handle prefix bytes: CB, DD, ED, FD
+	LD	A,(HL)
+	CP	$CB
+	JR	Z,PS_CB
+	CP	$ED
+	JR	Z,PS_ED
+	; DD or FD prefix: total = base_length_of_next + 1
+	; Consume the prefix byte
+	INC	HL
+	DEC	DE
+	LD	A,D
+	OR	E
+	RET	Z
+	LD	A,(HL)
+	CP	$CB		; DD CB dd op = 4 bytes total
+	JR	Z,PS_DDCB
+	; Look up base length of inner opcode
+	PUSH	HL
+	LD	C,A
+	LD	B,0
+	LD	HL,Z80LEN
+	ADD	HL,BC
+	LD	B,(HL)		; B = inner instruction length
+	POP	HL
+	; Skip B more bytes (inner instruction body)
+	JR	PS_ADV
+;
+PS_DDCB:
+	; DD/FD CB dd op: 4 total, consumed 1 (DD/FD), skip 3 more
+	LD	B,3
+	JR	PS_ADV
+;
+PS_CB:
+	; CB xx: 2 bytes total, skip 2
+	LD	B,2
+	JR	PS_ADV
+;
+PS_ED:
+	; ED xx: 2 or 4 bytes
+	INC	HL
+	DEC	DE
+	LD	A,D
+	OR	E
+	RET	Z
+	LD	A,(HL)
+	; 4-byte ED opcodes: 43,4B,53,5B,63,6B,73,7B
+	; Pattern: AND $C7 == $43
+	AND	$C7
+	CP	$43
+	JR	Z,PS_ED4
+	; 2-byte ED: consumed 2, done
+	LD	A,D
+	OR	E
+	RET
+PS_ED4:
+	; 4-byte ED: consumed 2, skip 2 more
+	LD	B,2
+	JR	PS_ADV
+;
+; ============================================================
+; Z80LEN - Z80 base opcode instruction length table ($00-$FF)
+; 0 = prefix byte (CB/DD/ED/FD) requiring secondary lookup
+; 1 = 1-byte instruction
+; 2 = 2-byte instruction (opcode + immediate/displacement)
+; 3 = 3-byte instruction (opcode + 16-bit immediate/address)
+; ============================================================
+Z80LEN:
+	DB 1,3,1,1,1,1,2,1,1,1,1,1,1,1,2,1	; $00-$0F
+	DB 2,3,1,1,1,1,2,1,2,1,1,1,1,1,2,1	; $10-$1F
+	DB 2,3,3,1,1,1,2,1,2,1,3,1,1,1,2,1	; $20-$2F
+	DB 2,3,3,1,1,1,2,1,2,1,3,1,1,1,2,1	; $30-$3F
+	DB 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1	; $40-$4F
+	DB 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1	; $50-$5F
+	DB 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1	; $60-$6F
+	DB 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1	; $70-$7F
+	DB 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1	; $80-$8F
+	DB 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1	; $90-$9F
+	DB 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1	; $A0-$AF
+	DB 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1	; $B0-$BF
+	DB 1,1,3,3,3,1,2,1,1,1,3,0,3,3,2,1	; $C0-$CF (CB=0)
+	DB 1,1,3,2,3,1,2,1,1,1,3,2,3,0,2,1	; $D0-$DF (DD=0)
+	DB 1,1,3,1,3,1,2,1,1,1,3,1,3,0,2,1	; $E0-$EF (ED=0)
+	DB 1,1,3,1,3,1,2,1,1,1,3,1,3,0,2,1	; $F0-$FF (FD=0)
 ;

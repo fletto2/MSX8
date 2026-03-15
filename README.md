@@ -1,99 +1,60 @@
-# MSX8
-MSX8 CP/M PROGRAM TO LAUNCH MSX GAME ROMS
+# MSX8 - Improved I/O Patcher
 
-<b>IMPORTANT NOTICE</b>
-- Heathkit users will need to jumper the VDP interrupt to INT3 on the graphics card so that the games get the 60HZ video refresh that they need to work. Follow this link: [GFX BOARD INT](https://github.com/lesbird/MSX8#graphics-board-setup)
-- RC2014 users will need (1) RomWBW module, (2) TMS9918 module, (3) YM/AY sound module, (4) SIO/2 module OR replace the TMS9918 and YM/AY sound module with my [MSX GRAPHICS/SOUND/JOYSTICK](https://github.com/sebhc/sebhc/wiki/RCBUSMSX) module
-  
-[MSX8.ZIP - 36KB](https://github.com/lesbird/MSX8/blob/main/MSX8.zip) (MSX version) the launcher including ASM source code and MSX-US.ROM for the Heathkit H8 computer with the MSX graphics board. Copy these to a CP/M drive on your Heathkit computer.
+Forked from [lesbird/MSX8](https://github.com/lesbird/MSX8) - MSX ROM launcher for Z80 retro platforms (Heathkit H8, NABU PC, RC2014).
 
-[MSX8H8.ZIP - 36KB](https://github.com/lesbird/MSX8/blob/main/MSX8H8.zip) (HA8-3 version) the launcher including ASM source code and MSX-US.ROM for the Heathkit H8 computer with an original HA8-3 or compatible graphics card. Copy these to a CP/M drive on your Heathkit computer.
+This fork improves the NABU BIOS patcher (MSX8P) with heuristics to reduce false positives when patching direct hardware I/O in MSX game ROMs.
 
-[MSX8 FOR NABU - 36KB](https://github.com/lesbird/MSX8/blob/main/MSX8NABU.zip) the CP/M launcher and customized MSX BIOS for the NABU Personal Computer.
+## What's Changed (NABU BIOS patcher)
 
-<b>RomWBW version only</b><br>
-[MSX8 FOR RC2014](https://github.com/lesbird/MSX8/blob/main/MSX8RC2014.zip) with MSX Graphics Sound and Joystick module<br>
-[MSX8 FOR RC2014](https://github.com/lesbird/MSX8/blob/main/MSX8RC2014MKBDSIO2.zip) with MSX Graphics Sound and Joystick module and MSX Omega keyboard and SIO2 serial I/O<br>
-[MSX8 FOR RC2014](https://github.com/lesbird/MSX8/blob/main/MSX8RC2014MKBDRS232.zip) with MSX Graphics Sound and Joystick module and MSX Omega keyboard and my 16550 RS232 module<br>
+The original patcher scans ROM code byte-by-byte for MSX I/O port values and replaces them with NABU equivalents. The problem: it cannot distinguish code from data, so it may corrupt sprite tables, music data, or lookup tables that happen to contain port-value bytes.
 
-[MSXROMS.ZIP - 6MB](https://drive.google.com/file/d/1CPUKjfRxF2Sq3ZCcoAHj1XeqptBqdim3/view?usp=sharing) 481 ROMs all batch renamed to CP/M friendly 8.3 format. Roms over 32K have been removed.
+This fork adds two improvements:
 
-[ROM CROSS REFERENCE](https://github.com/lesbird/MSX8/blob/main/romlist.md) - list of game ROM status (working or not) along with long file names
+### 1. Z80 instruction boundary tracking
 
-Launch games as shown below
-```
->MSX8 PACMAN.ROM
-```
-MSX8 is a CP/M program that loads a customized MSX BIOS rom file and a MSX ROM game and then launches it. This program was designed to work with the Heathkit H8 computer with an [HA8-3 Color Graphics Card](https://github.com/sebhc/sebhc/wiki/HA-8-3) (TMS9918 and AY3-8910) or with my own H8-8-3 Color Graphics card with a F18A on a Tang Nano 9K (a clone of the HA8-3). It is portable across many platforms including NABU and RC2014.
+A 256-byte opcode length table (`Z80LEN`) and skip routine (`PATSKIP`) walk the ROM respecting actual Z80 instruction lengths. The scanner only checks bytes that fall on instruction boundaries, so operand bytes inside multi-byte instructions are never misidentified as I/O opcodes.
 
-This repository contains the source code for the CP/M program buildable with the standard CP/M ASM program as follows:
+**Before:** `LD HL,$98D3` (`21 D3 98`) — scanner sees `D3 98` at offset+1 and falsely patches it as `OUT ($98),A`
 
-```
->ASM MSX8.AAZ
-.
-.
->LOAD MSX8
-```
+**After:** scanner reads `$21` at offset 0, looks up length=3, skips to offset+3 — operand bytes correctly ignored
 
-Also included in this repo is a customized FULL MSX BIOS rom that addresses the Heathkit Color Graphics card, NABU and RC2014 ports. The customized MSX BIOS can be built with Z80ASM included as part of this project. Just run the make file with the paramters as follows:
+Handles all Z80 prefixes (CB, DD/FD, ED) including 4-byte DD CB and ED 43-7B variants.
 
-```
->make TARGETS=us
-```
+### 2. Context-validated LD C patching
 
-Porting the BIOS to other platforms requires changing the I/O addresses using these defines that I added at the top of BIOS.ASM
+`LD C,$98` (`0E 98`) is common as data. The patcher now only patches `LD C,<port>` when a block I/O instruction (OUTI/OTIR/INI/INIR/OUTD/OTDR) is confirmed within 12 bytes ahead, using a bit-pattern check on ED-prefixed opcodes (bit 1 set, range $A2-$BB).
 
-```
-; Define VDP/PSG ports for Heathkit graphics board
-        DEFC    VDPDAT = $B8
-        DEFC    VDPCTL = $B9
-        DEFC    PSGCTL = $BB
-	DEFC	PSGDAT = $BA
-	DEFC	PSGRIN = $BA
-```
+### Additional improvements
 
-And then modifying the platform joystick code in BIOS.ASM at this location:
+- **Full PPI port handling**: OUT/IN to $A8 (slot select), $A9 (keyboard matrix), $AA (PPI-C row select), $AB (PPI mode) — the original patcher only handled $A8 and $A9
+- **Smart PSG read**: RST 18 handler checks the selected PSG register — R14/R15 (joystick) routes through the NABU joystick translator, other registers do a real PSG read from NABU port $40
+- **Keyboard matrix wrapper**: RST 10 handler masks the row number with $0F before passing to the keyboard emulator, fixing compatibility with games that use the read-modify-write PPI-C pattern
+- **Fixed keyboard RST opcode**: was $DF (RST 18 = joystick handler), now $D7 (RST 10 = keyboard handler)
 
-```
-; JOYSTICK CODE
-; MSX FORMAT: CAS,KBD,TRGB,TRGA,RGT,LFT,DWN,UP
-; H8 FORMAT: 14 - PLR4DN,PLR4UP,PLR3DN,PLR3UP,PLR2DN,PLR2UP,PLR1DN,PLR1UP
-; H8 FORMAT: 15 - PLR4RG,PLR4LF,PLR3RG,PLR3LF,PLR2RG,PLR2LF,PLR1RG,PLR1LF
-; H8 FORMAT: 14 - 0x03=PLR1TRG,0x0C=PLR2TRG,0x30=PLR3TRG,0xC0=PLR4TRG
-H8JSTK:	push	bc
-```
+### Patch table
 
-Be careful when modifying the BIOS.ASM code. Adding code could offset the memory locations and break things. If you change code make sure you do not throw off the alignment. For example, if you remove a line of code you need to offset it with the correct number of "NOP"s to keep the memory alignment the same:
+| MSX Port | Instruction | NABU Replacement | Method |
+|----------|------------|-----------------|--------|
+| $98 | OUT/IN (VDP data) | $A0 | byte patch |
+| $99 | OUT/IN (VDP ctrl) | $A1 | byte patch |
+| $A0 | OUT (PSG addr) | RST 28 + NOP | trampoline |
+| $A1 | OUT (PSG data) | RST 30 + NOP | trampoline |
+| $A2 | IN (PSG read) | RST 18 + NOP | trampoline |
+| $A8 | OUT (slot select) | NOP NOP | no-op |
+| $A8 | IN (slot read) | LD A,$00 | return 0 |
+| $A9 | OUT (PPI-B) | NOP NOP | no-op |
+| $A9 | IN (keyboard) | LD C,A + RST 10 | trampoline |
+| $AA | OUT (PPI-C row) | NOP NOP | no-op (A preserved) |
+| $AA | IN (PPI-C read) | LD A,$F0 | return upper nibble |
+| $AB | OUT (PPI mode) | NOP NOP | no-op |
+| LD C,$98-$A2 | + block I/O | NABU port | context-validated |
 
-```
-;       ld      a,$0F    ; commented out code
-	nop              ; NOPs added to keep alignment
-	nop              ;
-```
+### Known limitations
 
-Adding code to the END of BIOS.ASM is fine, as I did with the joystick code, it's code that preceeds label A2689 that needs to stay in alignment.
+- **INC C/DEC C port toggle** (4 games): NABU PSG ports $40/$41 are reversed relative to MSX $A0/$A1, so incrementing C gives the wrong port
+- **Inline data blocks**: if code jumps over data, the linear scanner may lose instruction boundary sync within the data region
+- **Computed port values**: `OUT (C),r` where C is loaded from memory or computed at runtime cannot be statically detected (games using BIOS port indirection at $0006/$0007 work automatically since the NABU BIOS stores correct ports there)
 
-When MSX8 is launched it jumps to high memory (0xC000) and then will look for and load the custom MSX BIOS called "msx-us.rom". This custom BIOS is loaded to a temporary address at 0x0100 up to 0x3FFF (roughly 16K). MSX8 will then load the GAME ROM that is passed as a parameter on the CP/M command line like this:
+## Original README
 
-```
-A0>MSX8 GALAGA.ROM
-```
-
-The GAME ROM file must exist in the same folder as MSX8.COM and MSX-US.ROM. The GAME ROM is loaded at address 0x4000 up to 0xC000 (maximum ROM size is 32K). MSX8 also patches high memory with default values that some games need as specified in the MSX Redbook. When the GAME ROM is loaded the MSX BIOS is then copied down to address 0x0000 (since we don't need CP/M for file I/O anymore) and MSX8 will launch the game. The game start address is retrieved from the beginning of the GAME ROM contents at address 0x4002.
-
-```
-        LHLD    4002H  ; HL=START ADDRESS
-        PCHL           ; JUMP TO START ADDRESS TO LAUNCH THE GAME
-```
-
-At this point all control is passed to the GAME ROM with the MSX BIOS in low memory starting at 0x0000.
-
-Some game ROMs have varying start addresses. Most games start at 0x40xx but a few games like Space Invaders, for example, start at 0x80xx. If this is detected the game code is copied up to 0x8000 through 0xC000 (16K max) and launched.
-
-I have tested this with some of the popular arcade conversions for the MSX computer such as <b>PACMAN, GALAGA, GALAXIAN, DIGDUG, RALLYX, BOSCONIAN</b> and they all work perfectly. Some ROMs do not work. One in particular is FROGGER. I disassembled the FROGGER ROM and discovered it is doing direct writes to the VDP/PSG instead of going through the BIOS. I suspect many non-working games are doing this as well. I wrote a patcher version of MSX8 which is called MSX8P. You use it just like MSX8 except it will search the ROM code for IN/OUT/OUTI and replace MSX I/O port addresses with the target platform I/O addresses. This somewhat fixes FROGGER and most direct I/O games but is not perfect because it is almost impossible to distinguish code from data so it may be patching data by accident. Also it is possible that some I/O port addresses are being read from a table somewhere else in memory and in this case the patcher will not work.
-
-### GRAPHICS BOARD SETUP
-
-Enable INT3 VDP interrupts on the graphics card so it will generate the 60Hz refresh rate that the games need in order to run properly.
-
-![GFX VDP](https://github.com/lesbird/MSX8/blob/main/MODGFX.jpg)
+See the [upstream repository](https://github.com/lesbird/MSX8) for full documentation on MSX8 usage, building, and platform-specific setup (Heathkit, NABU, RC2014).
