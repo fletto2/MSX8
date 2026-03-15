@@ -5391,6 +5391,19 @@ PLCVED:
 	JR	C,PLCVNX	; < $A2
 	CP	$BC
 	JR	NC,PLCVNX	; >= $BC
+	; Block I/O confirmed ($A2-$BB).
+	; Reject repeat variants (OTIR/INIR/OTDR/INDR = $B2-$BB) for VDP
+	; ports — OTIR causes TMS9918 visual snow, games use OUTI+DJNZ
+	; instead, so LD C,$98 + OTIR is almost certainly a false positive.
+	CP	$B2
+	JR	C,PLCVYES	; $A2-$AB = single transfer, always accept
+	; $B2-$BB = repeat transfer — only accept for PSG targets
+	LD	A,B		; B = NABU replacement port
+	CP	VDPDAT		; $A0
+	JR	Z,PLCVNX	; VDP data + repeat = reject
+	CP	VDPCTL		; $A1
+	JR	Z,PLCVNX	; VDP ctrl + repeat = reject
+	; PSG port + repeat = accept (falls through)
 PLCVYES:
 	; Confirmed: instruction uses port in C register
 	POP	DE
